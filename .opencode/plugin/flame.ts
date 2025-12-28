@@ -372,8 +372,21 @@ interface FrameMetadata {
   parentSessionID?: string
   /** Current status of the frame */
   status: FrameStatus
-  /** Goal/purpose of this frame */
-  goal: string
+
+  // Identity & Success Criteria (set at creation, immutable)
+  /** Short name for the frame (e.g., "User Authentication") */
+  title: string
+  /** Full success criteria - what defines "done" */
+  successCriteria: string
+  /** Dense compacted version of success criteria for tree/context display */
+  successCriteriaCompacted: string
+
+  // Results (set at completion)
+  /** Full results - detailed summary of what was accomplished */
+  results?: string
+  /** Dense compacted version of results for tree/context display */
+  resultsCompacted?: string
+
   /** When the frame was created */
   createdAt: number
   /** When the frame was last updated */
@@ -382,10 +395,9 @@ interface FrameMetadata {
   artifacts: string[]
   /** Key decisions made in this frame */
   decisions: string[]
-  /** Compaction summary when frame completes */
-  compactionSummary?: string
   /** Path to full log file (when exported) */
   logPath?: string
+
   // Phase 1.6: Planning and Invalidation fields
   /** Reason for invalidation (if status is 'invalidated') */
   invalidationReason?: string
@@ -644,16 +656,23 @@ function getTokenBudget(): TokenBudget {
  * Generate a hash of frame state for cache invalidation.
  * Changes to frame status, summaries, or structure invalidate the cache.
  */
-function generateStateHash(frame: FrameMetadata | null, ancestors: FrameMetadata[], siblings: FrameMetadata[]): string {
+function generateStateHash(
+  frame: FrameMetadata | null,
+  ancestors: FrameMetadata[],
+  siblings: FrameMetadata[],
+  plannedChildren: FrameMetadata[] = []
+): string {
   const parts = [
     frame?.sessionID || "none",
     frame?.status || "none",
     frame?.updatedAt?.toString() || "0",
-    frame?.compactionSummary?.length?.toString() || "0",
+    frame?.resultsCompacted?.length?.toString() || "0",
     ancestors.length.toString(),
     ancestors.map(a => `${a.sessionID}:${a.status}:${a.updatedAt}`).join(","),
     siblings.length.toString(),
     siblings.map(s => `${s.sessionID}:${s.status}:${s.updatedAt}`).join(","),
+    plannedChildren.length.toString(),
+    plannedChildren.map(c => `${c.sessionID}:${c.title}`).join(","),
   ]
   return parts.join("|")
 }
@@ -737,10 +756,11 @@ function generateFrameCompactionPrompt(
   prompt += `**Compaction Type:** ${compactionType}\n`
   prompt += `**Timestamp:** ${timestamp}\n\n`
 
-  // Frame identity and goal
+  // Frame identity and success criteria
   prompt += `### Current Frame\n`
   prompt += `- **Frame ID:** ${frame.sessionID.substring(0, 8)}\n`
-  prompt += `- **Goal:** ${frame.goal}\n`
+  prompt += `- **Title:** ${frame.title}\n`
+  prompt += `- **Success Criteria:** ${frame.successCriteria}\n`
   prompt += `- **Status:** ${frame.status}\n`
   prompt += `- **Created:** ${new Date(frame.createdAt).toISOString()}\n\n`
 
@@ -748,10 +768,11 @@ function generateFrameCompactionPrompt(
   if (ancestors.length > 0) {
     const parent = ancestors[0] // Immediate parent
     prompt += `### Parent Frame Context\n`
-    prompt += `- **Parent Goal:** ${parent.goal}\n`
+    prompt += `- **Parent Title:** ${parent.title}\n`
+    prompt += `- **Parent Criteria:** ${parent.successCriteriaCompacted}\n`
     prompt += `- **Parent Status:** ${parent.status}\n`
-    if (parent.compactionSummary) {
-      prompt += `- **Parent Summary:** ${parent.compactionSummary.substring(0, 500)}${parent.compactionSummary.length > 500 ? '...' : ''}\n`
+    if (parent.resultsCompacted) {
+      prompt += `- **Parent Results:** ${parent.resultsCompacted.substring(0, 500)}${parent.resultsCompacted.length > 500 ? '...' : ''}\n`
     }
     prompt += `\n`
   }
@@ -774,11 +795,11 @@ function generateFrameCompactionPrompt(
   }
 
   // Include sibling context for awareness
-  const completedSiblings = siblings.filter(s => s.status === 'completed' && s.compactionSummary)
+  const completedSiblings = siblings.filter(s => s.status === 'completed' && s.resultsCompacted)
   if (completedSiblings.length > 0) {
     prompt += `### Related Completed Work (Siblings)\n`
     completedSiblings.slice(0, 3).forEach(sibling => {
-      prompt += `- **${sibling.goal}:** ${sibling.compactionSummary?.substring(0, 200) || 'No summary'}${(sibling.compactionSummary?.length || 0) > 200 ? '...' : ''}\n`
+      prompt += `- **${sibling.title}:** ${sibling.resultsCompacted?.substring(0, 200) || 'No results'}${(sibling.resultsCompacted?.length || 0) > 200 ? '...' : ''}\n`
     })
     prompt += `\n`
   }
@@ -787,7 +808,7 @@ function generateFrameCompactionPrompt(
   if (compactionType === 'frame_completion') {
     prompt += `### Compaction Instructions (Frame Completion)\n\n`
     prompt += `This frame is being completed. Generate a comprehensive summary that:\n\n`
-    prompt += `1. **Summarizes progress** toward the frame goal: "${frame.goal}"\n`
+    prompt += `1. **Summarizes progress** toward the success criteria: "${frame.successCriteria}"\n`
     prompt += `2. **Lists key outcomes** - what was accomplished, built, or fixed\n`
     prompt += `3. **Documents decisions** - important choices made and their rationale\n`
     prompt += `4. **Notes dependencies** - any requirements for or from sibling/child frames\n`
@@ -796,7 +817,7 @@ function generateFrameCompactionPrompt(
     prompt += `**Format:** Write 2-4 paragraphs covering outcomes, decisions, and any remaining concerns.\n`
   } else if (compactionType === 'manual_summary') {
     prompt += `### Compaction Instructions (Manual Summary)\n\n`
-    prompt += `Generate a checkpoint summary of work in progress for the frame goal: "${frame.goal}"\n\n`
+    prompt += `Generate a checkpoint summary of work in progress for: "${frame.title}"\n\n`
     prompt += `1. **Current state** - what has been done so far\n`
     prompt += `2. **In-flight work** - what is currently being worked on\n`
     prompt += `3. **Next steps** - immediate next actions planned\n`
@@ -806,7 +827,7 @@ function generateFrameCompactionPrompt(
     // Overflow compaction - continuation context
     prompt += `### Compaction Instructions (Overflow - Continuation)\n\n`
     prompt += `Context window overflow detected. Generate a continuation summary that preserves:\n\n`
-    prompt += `1. **Frame goal context** - remind that we're working toward: "${frame.goal}"\n`
+    prompt += `1. **Frame context** - remind that we're working toward: "${frame.title}" (${frame.successCriteriaCompacted})\n`
     prompt += `2. **Recent progress** - what was accomplished in the compacted portion\n`
     prompt += `3. **Current state** - where things stand now\n`
     prompt += `4. **Active threads** - any in-progress tasks or discussions\n`
@@ -1286,7 +1307,7 @@ async function evaluatePushHeuristics(
   // Default context values
   const recentMessages = context.recentMessages || 0
   const recentFileChanges = context.recentFileChanges || []
-  const currentGoal = context.currentGoal || frame?.goal || ''
+  const currentGoal = context.currentGoal || frame?.title || ''
   const potentialNewGoal = context.potentialNewGoal || ''
   const errorCount = context.errorCount || 0
   const tokenCount = context.tokenCount || 0
@@ -1452,7 +1473,7 @@ async function evaluatePopHeuristics(
   const heuristicScores: Record<string, number> = {}
 
   // Default context values
-  const goalKeywords = context.goalKeywords || (frame ? Array.from(extractKeywords(frame.goal)) : [])
+  const goalKeywords = context.goalKeywords || (frame ? Array.from(extractKeywords(`${frame.title} ${frame.successCriteria}`)) : [])
   const recentArtifacts = context.recentArtifacts || frame?.artifacts || []
   const successSignals = context.successSignals || []
   const failureSignals = context.failureSignals || []
@@ -1747,8 +1768,8 @@ function scoreAncestor(ancestor: FrameMetadata, depth: number, currentFrame: Fra
     score += 10 // Completed with summary is valuable
   }
 
-  // Has summary bonus (more context available)
-  if (ancestor.compactionSummary) {
+  // Has results bonus (more context available)
+  if (ancestor.resultsCompacted) {
     score += 20
   }
 
@@ -1817,9 +1838,9 @@ function selectAncestors(
  * Format an ancestor for token estimation.
  */
 function formatAncestorForContext(ancestor: FrameMetadata): string {
-  let content = ancestor.goal
-  if (ancestor.compactionSummary) {
-    content += " " + ancestor.compactionSummary
+  let content = `${ancestor.title}: ${ancestor.successCriteriaCompacted}`
+  if (ancestor.resultsCompacted) {
+    content += " " + ancestor.resultsCompacted
   }
   if (ancestor.artifacts.length > 0) {
     content += " " + ancestor.artifacts.join(", ")
@@ -1835,30 +1856,30 @@ function formatAncestorForContext(ancestor: FrameMetadata): string {
  * Calculate relevance score for a sibling relative to current frame's goal.
  * Uses keyword overlap and recency.
  */
-function scoreSibling(sibling: FrameMetadata, currentGoal: string): number {
+function scoreSibling(sibling: FrameMetadata, currentCriteria: string): number {
   let score = 0
 
   // Recency bonus (completed within last hour gets max bonus)
   const ageHours = (Date.now() - sibling.updatedAt) / (1000 * 60 * 60)
   score += Math.max(0, 100 - (ageHours * 10))
 
-  // Keyword overlap with current goal
-  const currentWords = extractKeywords(currentGoal)
-  const siblingWords = extractKeywords(sibling.goal)
-  const summaryWords = sibling.compactionSummary ? extractKeywords(sibling.compactionSummary) : new Set<string>()
+  // Keyword overlap with current criteria
+  const currentWords = extractKeywords(currentCriteria)
+  const siblingWords = extractKeywords(`${sibling.title} ${sibling.successCriteriaCompacted}`)
+  const resultsWords = sibling.resultsCompacted ? extractKeywords(sibling.resultsCompacted) : new Set<string>()
 
-  // Check goal overlap
+  // Check criteria overlap
   for (const word of currentWords) {
     if (siblingWords.has(word)) {
       score += 20 // Strong relevance signal
     }
-    if (summaryWords.has(word)) {
+    if (resultsWords.has(word)) {
       score += 10 // Moderate relevance signal
     }
   }
 
-  // Has summary bonus (more useful context)
-  if (sibling.compactionSummary) {
+  // Has results bonus (more useful context)
+  if (sibling.resultsCompacted) {
     score += 30
   }
 
@@ -1960,9 +1981,9 @@ function selectSiblings(
  * Format a sibling for token estimation.
  */
 function formatSiblingForContext(sibling: FrameMetadata): string {
-  let content = sibling.goal
-  if (sibling.compactionSummary) {
-    content += " " + sibling.compactionSummary
+  let content = `${sibling.title}: ${sibling.successCriteriaCompacted}`
+  if (sibling.resultsCompacted) {
+    content += " " + sibling.resultsCompacted
   }
   if (sibling.artifacts.length > 0) {
     content += " " + sibling.artifacts.join(", ")
@@ -1980,14 +2001,22 @@ class FrameStateManager {
   /**
    * Create a new frame (child of the current active frame)
    */
-  async createFrame(sessionID: string, goal: string, parentSessionID?: string): Promise<FrameMetadata> {
+  async createFrame(
+    sessionID: string,
+    title: string,
+    successCriteria: string,
+    successCriteriaCompacted: string,
+    parentSessionID?: string
+  ): Promise<FrameMetadata> {
     const state = await loadState(this.projectDir)
 
     const frame: FrameMetadata = {
       sessionID,
       parentSessionID,
       status: "in_progress",
-      goal,
+      title,
+      successCriteria,
+      successCriteriaCompacted,
       createdAt: Date.now(),
       updatedAt: Date.now(),
       artifacts: [],
@@ -2007,7 +2036,7 @@ class FrameStateManager {
     await saveFrame(this.projectDir, frame)
     await saveState(this.projectDir, state)
 
-    log("Frame created", { sessionID, goal, parentSessionID })
+    log("Frame created", { sessionID, title, parentSessionID })
     return frame
   }
 
@@ -2017,7 +2046,8 @@ class FrameStateManager {
   async updateFrameStatus(
     sessionID: string,
     status: FrameStatus,
-    summary?: string
+    results?: string,
+    resultsCompacted?: string
   ): Promise<FrameMetadata | null> {
     const state = await loadState(this.projectDir)
     const frame = state.frames[sessionID]
@@ -2028,8 +2058,11 @@ class FrameStateManager {
     }
 
     frame.status = status
-    if (summary) {
-      frame.compactionSummary = summary
+    if (results) {
+      frame.results = results
+    }
+    if (resultsCompacted) {
+      frame.resultsCompacted = resultsCompacted
     }
     frame.updatedAt = Date.now()
 
@@ -2047,8 +2080,9 @@ class FrameStateManager {
    */
   async completeFrame(
     sessionID: string,
-    status: FrameStatus = "completed",
-    summary?: string
+    status: FrameStatus,
+    results: string,
+    resultsCompacted: string
   ): Promise<string | undefined> {
     const state = await loadState(this.projectDir)
     const frame = state.frames[sessionID]
@@ -2059,9 +2093,8 @@ class FrameStateManager {
     }
 
     frame.status = status
-    if (summary) {
-      frame.compactionSummary = summary
-    }
+    frame.results = results
+    frame.resultsCompacted = resultsCompacted
     frame.updatedAt = Date.now()
 
     // Update active frame to parent
@@ -2165,15 +2198,16 @@ class FrameStateManager {
   }
 
   /**
-   * Initialize or get frame for a session
+   * Initialize or get frame for a session (auto-creates root frames)
    */
-  async ensureFrame(sessionID: string, title?: string): Promise<FrameMetadata> {
+  async ensureFrame(sessionID: string, sessionTitle?: string): Promise<FrameMetadata> {
     const existing = await this.getFrame(sessionID)
     if (existing) return existing
 
-    // Create a new root frame for this session
-    const goal = title || `Session ${sessionID.substring(0, 8)}`
-    return await this.createFrame(sessionID, goal)
+    // Create a new root frame for this session with default values
+    const title = sessionTitle || `Session ${sessionID.substring(0, 8)}`
+    const defaultCriteria = "(Auto-created root frame - set criteria with a planning tool)"
+    return await this.createFrame(sessionID, title, defaultCriteria, defaultCriteria)
   }
 
   // ================================================================
@@ -2186,7 +2220,9 @@ class FrameStateManager {
    */
   async createPlannedFrame(
     sessionID: string,
-    goal: string,
+    title: string,
+    successCriteria: string,
+    successCriteriaCompacted: string,
     parentSessionID?: string
   ): Promise<FrameMetadata> {
     const state = await loadState(this.projectDir)
@@ -2195,7 +2231,9 @@ class FrameStateManager {
       sessionID,
       parentSessionID,
       status: "planned",
-      goal,
+      title,
+      successCriteria,
+      successCriteriaCompacted,
       createdAt: Date.now(),
       updatedAt: Date.now(),
       artifacts: [],
@@ -2225,7 +2263,7 @@ class FrameStateManager {
     await saveFrame(this.projectDir, frame)
     await saveState(this.projectDir, state)
 
-    log("Planned frame created", { sessionID, goal, parentSessionID })
+    log("Planned frame created", { sessionID, title, parentSessionID })
     return frame
   }
 
@@ -2235,7 +2273,12 @@ class FrameStateManager {
    */
   async createPlannedChildren(
     parentSessionID: string,
-    children: Array<{ sessionID: string; goal: string }>
+    children: Array<{
+      sessionID: string
+      title: string
+      successCriteria: string
+      successCriteriaCompacted: string
+    }>
   ): Promise<FrameMetadata[]> {
     const state = await loadState(this.projectDir)
     const parent = state.frames[parentSessionID]
@@ -2251,7 +2294,9 @@ class FrameStateManager {
         sessionID: child.sessionID,
         parentSessionID,
         status: "planned",
-        goal: child.goal,
+        title: child.title,
+        successCriteria: child.successCriteria,
+        successCriteriaCompacted: child.successCriteriaCompacted,
         createdAt: Date.now(),
         updatedAt: Date.now(),
         artifacts: [],
@@ -2311,8 +2356,77 @@ class FrameStateManager {
     await saveFrame(this.projectDir, frame)
     await saveState(this.projectDir, state)
 
-    log("Frame activated", { sessionID, goal: frame.goal })
+    log("Frame activated", { sessionID, title: frame.title })
     return frame
+  }
+
+  /**
+   * Replace a frame ID (e.g., when converting plan-* to ses-*)
+   * Updates all references: children's parentSessionID, parent's plannedChildren, rootFrameIDs, activeFrameID
+   */
+  async replaceFrameID(oldID: string, newID: string): Promise<void> {
+    const state = await loadState(this.projectDir)
+    const frame = state.frames[oldID]
+
+    if (!frame) {
+      log("Frame not found for ID replacement", { oldID })
+      return
+    }
+
+    // Update frame's own ID
+    frame.sessionID = newID
+    frame.updatedAt = Date.now()
+
+    // Move in frames map
+    delete state.frames[oldID]
+    state.frames[newID] = frame
+
+    // Update children's parentSessionID
+    for (const f of Object.values(state.frames)) {
+      if (f.parentSessionID === oldID) {
+        f.parentSessionID = newID
+        await saveFrame(this.projectDir, f)
+      }
+    }
+
+    // Update parent's plannedChildren array
+    if (frame.parentSessionID) {
+      const parent = state.frames[frame.parentSessionID]
+      if (parent?.plannedChildren) {
+        const idx = parent.plannedChildren.indexOf(oldID)
+        if (idx >= 0) {
+          parent.plannedChildren[idx] = newID
+          await saveFrame(this.projectDir, parent)
+        }
+      }
+    }
+
+    // Update rootFrameIDs
+    const rootIdx = state.rootFrameIDs.indexOf(oldID)
+    if (rootIdx >= 0) {
+      state.rootFrameIDs[rootIdx] = newID
+    }
+
+    // Update activeFrameID
+    if (state.activeFrameID === oldID) {
+      state.activeFrameID = newID
+    }
+
+    // Save updated state and frame
+    await saveFrame(this.projectDir, frame)
+    await saveState(this.projectDir, state)
+
+    // Try to rename the frame file (best effort)
+    const oldPath = getFrameFilePath(this.projectDir, oldID)
+    const newPath = getFrameFilePath(this.projectDir, newID)
+    try {
+      await fs.promises.rename(oldPath, newPath)
+    } catch {
+      // File might not exist or rename might fail, that's okay
+      // The frame data is saved with the new ID
+    }
+
+    log("Frame ID replaced", { oldID, newID })
   }
 
   /**
@@ -2448,6 +2562,89 @@ interface ContextGenerationResult {
 }
 
 /**
+ * Sibling ordering information for stack discipline guidance
+ */
+interface SiblingOrderInfo {
+  /** Current frame's position among siblings (1-indexed) */
+  position: number
+  /** Total number of siblings including current frame */
+  total: number
+  /** Number of completed siblings */
+  completedCount: number
+  /** Number of in-progress siblings (should be 0 for proper stack discipline) */
+  inProgressCount: number
+  /** Number of planned/pending siblings */
+  pendingCount: number
+  /** The next pending sibling (if any) - for "next up" guidance */
+  nextPending: FrameMetadata | null
+  /** Whether there are other in-progress siblings (indicates stack discipline violation) */
+  hasOtherInProgress: boolean
+}
+
+/**
+ * Calculate sibling ordering info for stack discipline guidance.
+ * Siblings are ordered by createdAt timestamp.
+ */
+function calculateSiblingOrder(currentFrame: FrameMetadata, allSiblings: FrameMetadata[]): SiblingOrderInfo {
+  // Include current frame in the list for ordering
+  const allWithCurrent = [...allSiblings, currentFrame]
+
+  // Sort by createdAt to establish order
+  allWithCurrent.sort((a, b) => a.createdAt - b.createdAt)
+
+  // Find current frame's position (1-indexed)
+  const position = allWithCurrent.findIndex(f => f.sessionID === currentFrame.sessionID) + 1
+  const total = allWithCurrent.length
+
+  // Count by status
+  let completedCount = 0
+  let inProgressCount = 0
+  let pendingCount = 0
+  let nextPending: FrameMetadata | null = null
+  let hasOtherInProgress = false
+
+  for (const sibling of allWithCurrent) {
+    if (sibling.sessionID === currentFrame.sessionID) continue // Skip self
+
+    if (sibling.status === "completed") {
+      completedCount++
+    } else if (sibling.status === "in_progress") {
+      inProgressCount++
+      hasOtherInProgress = true
+    } else if (sibling.status === "planned") {
+      pendingCount++
+      // Track the first pending sibling after current frame's position
+      if (!nextPending) {
+        const siblingPos = allWithCurrent.findIndex(f => f.sessionID === sibling.sessionID) + 1
+        if (siblingPos > position) {
+          nextPending = sibling
+        }
+      }
+    }
+  }
+
+  // If no pending after current, check for any pending before (wrap around)
+  if (!nextPending) {
+    for (const sibling of allWithCurrent) {
+      if (sibling.status === "planned" && sibling.sessionID !== currentFrame.sessionID) {
+        nextPending = sibling
+        break
+      }
+    }
+  }
+
+  return {
+    position,
+    total,
+    completedCount,
+    inProgressCount,
+    pendingCount,
+    nextPending,
+    hasOtherInProgress,
+  }
+}
+
+/**
  * Generate XML context for injection into LLM calls.
  * Phase 1.2: Includes token budget management, intelligent selection, and caching.
  */
@@ -2474,10 +2671,25 @@ async function generateFrameContextWithMetadata(
 
   // Get all ancestors and siblings first
   const allAncestors = await manager.getAncestors(sessionID)
-  const allSiblings = await manager.getCompletedSiblings(sessionID)
+  const completedSiblings = await manager.getCompletedSiblings(sessionID)
+  const allSiblings = await manager.getAllSiblings(sessionID)
 
-  // Generate state hash for cache lookup
-  const stateHash = generateStateHash(frame, allAncestors, allSiblings)
+  // Calculate sibling ordering info for stack discipline guidance
+  const siblingOrderInfo = calculateSiblingOrder(frame, allSiblings)
+
+  // Get planned children for the current frame
+  const plannedChildren: FrameMetadata[] = []
+  if (frame.plannedChildren && frame.plannedChildren.length > 0) {
+    for (const childID of frame.plannedChildren) {
+      const child = await manager.getFrame(childID)
+      if (child && child.status === "planned") {
+        plannedChildren.push(child)
+      }
+    }
+  }
+
+  // Generate state hash for cache lookup (include planned children)
+  const stateHash = generateStateHash(frame, allAncestors, allSiblings, plannedChildren)
 
   // Check cache
   const cachedEntry = runtime.contextCache.get(sessionID)
@@ -2500,10 +2712,10 @@ async function generateFrameContextWithMetadata(
   // Phase 1.2: Intelligent ancestor selection with budget
   const ancestorSelection = selectAncestors(allAncestors, budget.ancestors, frame)
 
-  // Phase 1.2: Sibling relevance filtering with budget
-  const siblingSelection = selectSiblings(allSiblings, budget.siblings, frame.goal)
+  // Phase 1.2: Sibling relevance filtering with budget (use completed siblings for context)
+  const siblingSelection = selectSiblings(completedSiblings, budget.siblings, `${frame.title} ${frame.successCriteria}`)
 
-  // Build context XML with selected frames
+  // Build context XML with selected frames and ordering guidance
   const { xml, currentTokens, wasTruncated } = buildContextXml(
     sessionID,
     frame,
@@ -2511,7 +2723,9 @@ async function generateFrameContextWithMetadata(
     siblingSelection.selected,
     ancestorSelection.truncatedCount,
     siblingSelection.filteredCount,
-    budget
+    budget,
+    plannedChildren,
+    siblingOrderInfo
   )
 
   // Calculate total tokens
@@ -2552,7 +2766,125 @@ async function generateFrameContextWithMetadata(
 }
 
 /**
- * Build the XML context string with metadata and truncation indicators.
+ * Build workflow guidance section with stack discipline instructions.
+ * This appears at the TOP of the context for maximum visibility.
+ */
+function buildWorkflowGuidance(
+  frame: FrameMetadata,
+  plannedChildren: FrameMetadata[],
+  siblingOrderInfo?: SiblingOrderInfo
+): string {
+  let xml = ``
+
+  // Detect if this is a root frame with no planning done yet
+  const isRootFrame = !frame.parentSessionID
+  const isUnplannedRoot = isRootFrame && plannedChildren.length === 0
+  const isAutoCreatedFrame = frame.successCriteria.includes("Auto-created")
+
+  // =========================================================================
+  // CORE PHILOSOPHY - This is the PRIMARY instruction for task management
+  // =========================================================================
+  xml += `  <flame-task-management>\n`
+  xml += `    <philosophy>\n`
+  xml += `      FLAME TOOLS ARE YOUR PRIMARY TASK MANAGEMENT SYSTEM.\n`
+  xml += `      Do NOT use TodoWrite. Use flame_push/flame_pop/flame_plan_children instead.\n`
+  xml += `      Every significant unit of work should be a frame with clear success criteria.\n`
+  xml += `    </philosophy>\n\n`
+
+  // =========================================================================
+  // INITIAL PLANNING GUIDANCE - Critical for new/root sessions
+  // =========================================================================
+  if (isUnplannedRoot || isAutoCreatedFrame) {
+    xml += `    <initial-planning priority="HIGH">\n`
+    xml += `      THIS IS A NEW SESSION. Before writing any code:\n`
+    xml += `      1. Analyze the task complexity\n`
+    xml += `      2. If the task has multiple components/features, use flame_plan_children to break it down\n`
+    xml += `      3. Each child frame should have specific, verifiable success criteria\n`
+    xml += `      4. Then use flame_activate to start the first child task\n`
+    xml += `      \n`
+    xml += `      Example for a complex task:\n`
+    xml += `        flame_plan_children with children: [\n`
+    xml += `          { title: "Feature A", successCriteria: "...", successCriteriaCompacted: "..." },\n`
+    xml += `          { title: "Feature B", successCriteria: "...", successCriteriaCompacted: "..." }\n`
+    xml += `        ]\n`
+    xml += `    </initial-planning>\n\n`
+  }
+
+  // =========================================================================
+  // WHEN TO CREATE CHILD FRAMES - Dynamic decomposition guidance
+  // =========================================================================
+  xml += `    <when-to-create-child-frames>\n`
+  xml += `      CREATE a new child frame (flame_push) when you encounter:\n`
+  xml += `      - A subtask that has its own distinct success criteria\n`
+  xml += `      - Work that could be done independently or in parallel\n`
+  xml += `      - Multiple approaches to try (each approach = separate frame)\n`
+  xml += `      - Separable concerns (e.g., implement feature vs write tests)\n`
+  xml += `      - Context switches (different files, different subsystems)\n`
+  xml += `      - Complexity that exceeds what fits in current frame's scope\n`
+  xml += `      - Any task that would benefit from its own summary when complete\n`
+  xml += `      \n`
+  xml += `      DO NOT cram everything into one frame. Decompose aggressively.\n`
+  xml += `      Frames are cheap. Context loss from poor organization is expensive.\n`
+  xml += `    </when-to-create-child-frames>\n\n`
+
+  // =========================================================================
+  // CURRENT FRAME STATUS
+  // =========================================================================
+  xml += `    <current-frame>\n`
+  xml += `      <title>${escapeXml(frame.title)}</title>\n`
+  xml += `      <success-criteria>${escapeXml(frame.successCriteria)}</success-criteria>\n`
+  xml += `      <status>${frame.status}</status>\n`
+  xml += `    </current-frame>\n\n`
+
+  // =========================================================================
+  // POSITION AND SIBLING STATUS
+  // =========================================================================
+  if (siblingOrderInfo && siblingOrderInfo.total > 1) {
+    xml += `    <position>Task ${siblingOrderInfo.position} of ${siblingOrderInfo.total}</position>\n`
+    xml += `    <sibling-status completed="${siblingOrderInfo.completedCount}" in-progress="${siblingOrderInfo.inProgressCount + 1}" pending="${siblingOrderInfo.pendingCount}" />\n`
+
+    // Warn about stack discipline violation
+    if (siblingOrderInfo.hasOtherInProgress) {
+      xml += `    <warning>STACK DISCIPLINE VIOLATION: ${siblingOrderInfo.inProgressCount} other sibling(s) are in_progress. Complete or pop them before starting new work.</warning>\n`
+    }
+  }
+
+  // =========================================================================
+  // NEXT ACTIONS
+  // =========================================================================
+  if (plannedChildren.length > 0) {
+    // Has children to work on
+    xml += `    <next-action>Complete current task, then activate first planned child</next-action>\n`
+    xml += `    <first-child title="${escapeXml(plannedChildren[0].title)}" id="${plannedChildren[0].sessionID.substring(0, 12)}" />\n`
+  } else if (siblingOrderInfo?.nextPending) {
+    // No children, but has pending siblings
+    xml += `    <next-action>Complete current task with flame_pop, then activate next sibling</next-action>\n`
+    xml += `    <next-sibling title="${escapeXml(siblingOrderInfo.nextPending.title)}" id="${siblingOrderInfo.nextPending.sessionID.substring(0, 12)}" />\n`
+  } else if (isRootFrame) {
+    // Root frame - encourage planning or completion
+    xml += `    <next-action>Either: (1) Plan subtasks with flame_plan_children, OR (2) Complete this task with flame_pop</next-action>\n`
+  } else {
+    // Leaf node with no pending siblings
+    xml += `    <next-action>Complete current task with flame_pop to return to parent</next-action>\n`
+  }
+
+  // =========================================================================
+  // CORE RULES
+  // =========================================================================
+  xml += `    <rules>\n`
+  xml += `      <rule>COMPLETE your current frame's success criteria before starting siblings</rule>\n`
+  xml += `      <rule>Call flame_pop with results/resultsCompacted when done</rule>\n`
+  xml += `      <rule>Work DEPTH-FIRST: finish children before moving to siblings</rule>\n`
+  xml += `      <rule>CREATE child frames for any significant sub-work (don't cram)</rule>\n`
+  xml += `      <rule>NEVER use TodoWrite - flame tools replace it entirely</rule>\n`
+  xml += `    </rules>\n`
+
+  xml += `  </flame-task-management>\n`
+  return xml
+}
+
+/**
+ * Build the XML context string with metadata, truncation indicators, and workflow guidance.
  */
 function buildContextXml(
   sessionID: string,
@@ -2561,10 +2893,15 @@ function buildContextXml(
   siblings: FrameMetadata[],
   ancestorsTruncated: number,
   siblingsFiltered: number,
-  budget: TokenBudget
+  budget: TokenBudget,
+  plannedChildren: FrameMetadata[] = [],
+  siblingOrderInfo?: SiblingOrderInfo
 ): { xml: string; currentTokens: number; wasTruncated: boolean } {
   let wasTruncated = false
   let xml = `<flame-context session="${sessionID}">\n`
+
+  // Add workflow guidance section FIRST for visibility
+  xml += buildWorkflowGuidance(frame, plannedChildren, siblingOrderInfo)
 
   // Add metadata header for debugging
   xml += `  <metadata>\n`
@@ -2593,8 +2930,8 @@ function buildContextXml(
     xml += `  </completed-siblings>\n`
   }
 
-  // Add current frame
-  const currentFrameXml = formatCurrentFrameXml(frame, "  ", budget.current)
+  // Add current frame with planned children
+  const currentFrameXml = formatCurrentFrameXml(frame, "  ", budget.current, plannedChildren)
   xml += currentFrameXml.xml
   if (currentFrameXml.wasTruncated) {
     wasTruncated = true
@@ -2611,20 +2948,22 @@ function buildContextXml(
 
 /**
  * Format a single frame (ancestor or sibling) as XML.
+ * Uses compacted versions for space efficiency.
  */
 function formatFrameXml(frame: FrameMetadata, indent: string, tokenBudgetPerFrame: number): string {
   let xml = `${indent}<frame id="${frame.sessionID.substring(0, 8)}" status="${frame.status}">\n`
-  xml += `${indent}  <goal>${escapeXml(frame.goal)}</goal>\n`
+  xml += `${indent}  <title>${escapeXml(frame.title)}</title>\n`
+  xml += `${indent}  <criteria>${escapeXml(frame.successCriteriaCompacted)}</criteria>\n`
 
-  if (frame.compactionSummary) {
-    // Truncate summary if needed
-    const summaryBudget = Math.floor(tokenBudgetPerFrame * 0.7) // 70% for summary
-    const { text: truncatedSummary, wasTruncated } = truncateToTokenBudget(
-      frame.compactionSummary,
-      summaryBudget,
+  if (frame.resultsCompacted) {
+    // Truncate results if needed
+    const resultsBudget = Math.floor(tokenBudgetPerFrame * 0.7) // 70% for results
+    const { text: truncatedResults, wasTruncated } = truncateToTokenBudget(
+      frame.resultsCompacted,
+      resultsBudget,
       " [truncated]"
     )
-    xml += `${indent}  <summary${wasTruncated ? ' truncated="true"' : ""}>${escapeXml(truncatedSummary)}</summary>\n`
+    xml += `${indent}  <results${wasTruncated ? ' truncated="true"' : ""}>${escapeXml(truncatedResults)}</results>\n`
   }
 
   if (frame.artifacts.length > 0) {
@@ -2641,15 +2980,18 @@ function formatFrameXml(frame: FrameMetadata, indent: string, tokenBudgetPerFram
 
 /**
  * Format the current frame as XML with full details.
+ * Phase 2: Includes planned children to show what work is planned next.
  */
 function formatCurrentFrameXml(
   frame: FrameMetadata,
   indent: string,
-  tokenBudget: number
+  tokenBudget: number,
+  plannedChildren: FrameMetadata[] = []
 ): { xml: string; wasTruncated: boolean } {
   let wasTruncated = false
   let xml = `${indent}<current-frame id="${frame.sessionID.substring(0, 8)}" status="${frame.status}">\n`
-  xml += `${indent}  <goal>${escapeXml(frame.goal)}</goal>\n`
+  xml += `${indent}  <title>${escapeXml(frame.title)}</title>\n`
+  xml += `${indent}  <success-criteria>${escapeXml(frame.successCriteria)}</success-criteria>\n`
 
   if (frame.artifacts.length > 0) {
     xml += `${indent}  <artifacts>${escapeXml(frame.artifacts.join(", "))}</artifacts>\n`
@@ -2670,17 +3012,16 @@ function formatCurrentFrameXml(
     xml += `${indent}  <decisions${decisionsTruncated ? ' truncated="true"' : ""}>${escapeXml(truncatedDecisions)}</decisions>\n`
   }
 
-  if (frame.compactionSummary) {
-    const summaryBudget = Math.floor(tokenBudget * 0.4)
-    const { text: truncatedSummary, wasTruncated: summaryTruncated } = truncateToTokenBudget(
-      frame.compactionSummary,
-      summaryBudget,
-      " [truncated]"
-    )
-    if (summaryTruncated) {
-      wasTruncated = true
+  // Phase 2: Add planned children section
+  if (plannedChildren.length > 0) {
+    xml += `${indent}  <planned-children count="${plannedChildren.length}">\n`
+    for (const child of plannedChildren) {
+      xml += `${indent}    <planned-task id="${child.sessionID.substring(0, 8)}">\n`
+      xml += `${indent}      <title>${escapeXml(child.title)}</title>\n`
+      xml += `${indent}      <criteria>${escapeXml(child.successCriteriaCompacted)}</criteria>\n`
+      xml += `${indent}    </planned-task>\n`
     }
-    xml += `${indent}  <summary${summaryTruncated ? ' truncated="true"' : ""}>${escapeXml(truncatedSummary)}</summary>\n`
+    xml += `${indent}  </planned-children>\n`
   }
 
   xml += `${indent}</current-frame>\n`
@@ -2998,26 +3339,14 @@ export const FlamePlugin: Plugin = async (ctx) => {
     },
 
     /**
-     * experimental.chat.messages.transform - inject frame context
+     * experimental.chat.system.transform - inject frame context into system prompt
+     * This is the recommended approach for adding context that should guide agent behavior.
      */
-    "experimental.chat.messages.transform": async (input, output) => {
+    "experimental.chat.system.transform": async (input, output) => {
       const sessionID = runtime.currentSessionID
       if (!sessionID) {
         log("No session ID available for context injection")
         return
-      }
-
-      // Deduplication: only process once per message batch
-      const batchKey = `transform-${Date.now()}`
-      if (runtime.processedMessageIDs.has(batchKey)) {
-        return
-      }
-      runtime.processedMessageIDs.add(batchKey)
-
-      // Clean up old entries (keep last 100)
-      if (runtime.processedMessageIDs.size > 100) {
-        const entries = Array.from(runtime.processedMessageIDs)
-        entries.slice(0, entries.length - 50).forEach((k) => runtime.processedMessageIDs.delete(k))
       }
 
       // Generate frame context
@@ -3030,35 +3359,13 @@ export const FlamePlugin: Plugin = async (ctx) => {
       }
 
       if (frameContext) {
-        // Prepend synthetic message with frame context
-        const syntheticMessage = {
-          info: {
-            id: `flame-context-${Date.now()}`,
-            sessionID,
-            role: "user" as const,
-            time: { created: Date.now() },
-            agent: "build",
-            model: { providerID: "flame", modelID: "context" },
-            synthetic: true,
-          },
-          parts: [
-            {
-              id: `flame-part-${Date.now()}`,
-              sessionID,
-              messageID: `flame-context-${Date.now()}`,
-              type: "text" as const,
-              text: frameContext,
-              synthetic: true,
-            },
-          ],
-        }
+        // Append to system prompt array
+        output.system.push(frameContext)
 
-        output.messages.unshift(syntheticMessage as any)
-
-        log("Frame context injected", {
+        log("Frame context injected into system prompt", {
           sessionID,
           contextLength: frameContext.length,
-          messageCount: output.messages.length,
+          systemPartsCount: output.system.length,
           hasSuggestions: !!autonomySuggestions,
         })
       }
@@ -3104,12 +3411,54 @@ export const FlamePlugin: Plugin = async (ctx) => {
 
         log("Compaction context added for frame (Phase 1.3)", {
           sessionID: input.sessionID,
-          goal: frame.goal,
+          title: frame.title,
           compactionType,
           ancestorCount: ancestors.length,
           siblingCount: siblings.length,
         })
       }
+    },
+
+    /**
+     * Tool execution hook - auto-track artifacts from file operations
+     * Phase 2: Automatically adds modified files to the current frame's artifacts
+     */
+    "tool.execute.after": async (
+      input: { tool: string; sessionID: string; callID: string },
+      output: { title: string; output: string; metadata: any }
+    ) => {
+      // Only track file operations (write, edit)
+      const fileTools = ["write", "edit"]
+      if (!fileTools.includes(input.tool)) {
+        return
+      }
+
+      // Get the file path from metadata
+      const filepath = output.metadata?.filepath || output.metadata?.filePath
+      if (!filepath) {
+        return
+      }
+
+      // Get the current session's frame
+      const frame = await manager.getFrame(input.sessionID)
+      if (!frame) {
+        return
+      }
+
+      // Only add if not already in artifacts
+      if (frame.artifacts.includes(filepath)) {
+        return
+      }
+
+      // Add the artifact
+      await manager.addArtifact(input.sessionID, filepath)
+      invalidateCache(input.sessionID)
+
+      log("AUTO-ARTIFACT: File operation tracked", {
+        tool: input.tool,
+        sessionID: input.sessionID,
+        filepath,
+      })
     },
 
     /**
@@ -3121,9 +3470,21 @@ export const FlamePlugin: Plugin = async (ctx) => {
        */
       flame_push: tool({
         description:
-          "Create a new child frame for a subtask. Use when starting a distinct unit of work that could be retried or rolled back independently.",
+          `Create a new child frame for a subtask. Use when starting a distinct unit of work that could be retried or rolled back independently.
+
+SUCCESS CRITERIA FORMAT:
+- Define what "done" looks like in concrete, verifiable terms
+- Include specific deliverables (files, endpoints, tests, etc.)
+- Make it clear when this frame can be marked complete
+
+COMPACTED VERSION:
+- Dense, information-rich summary (not a vague generalization)
+- Preserve key specifics: names, decisions, constraints
+- Can be a few sentences, but should maximize information density`,
         args: {
-          goal: tool.schema.string().describe("The goal/purpose of this new frame"),
+          title: tool.schema.string().describe("Short name for the frame (e.g., 'User Authentication', 'API Endpoints')"),
+          successCriteria: tool.schema.string().describe("Full success criteria - what defines 'done' for this frame. Be specific about deliverables."),
+          successCriteriaCompacted: tool.schema.string().describe("Dense compacted version for tree display. Preserve specifics, don't generalize."),
         },
         async execute(args, toolCtx) {
           const parentSessionID = runtime.currentSessionID
@@ -3137,7 +3498,7 @@ export const FlamePlugin: Plugin = async (ctx) => {
             const newSession = await client.session.create({
               body: {
                 parentID: parentSessionID,
-                title: args.goal,
+                title: args.title,
               },
             })
 
@@ -3148,23 +3509,34 @@ export const FlamePlugin: Plugin = async (ctx) => {
             const childSessionID = newSession.data.id
 
             // Initialize frame for the new session
-            await manager.createFrame(childSessionID, args.goal, parentSessionID)
+            await manager.createFrame(
+              childSessionID,
+              args.title,
+              args.successCriteria,
+              args.successCriteriaCompacted,
+              parentSessionID
+            )
 
-            // Phase 1.2: Invalidate parent cache (new child affects sibling context)
+            // Invalidate parent cache (new child affects sibling context)
             invalidateCache(parentSessionID)
 
             log("PUSH: Created child frame", {
               parentSessionID,
               childSessionID,
-              goal: args.goal,
+              title: args.title,
             })
 
-            return `Created new frame for: "${args.goal}"
+            return `# Frame Created
 
-Frame ID: ${childSessionID.substring(0, 8)}
-Parent: ${parentSessionID.substring(0, 8)}
+**Title:** ${args.title}
+**Frame ID:** ${childSessionID.substring(0, 8)}
+**Parent:** ${parentSessionID.substring(0, 8)}
 
-The new frame is now active. Work on this subtask, then use flame_pop to complete it and return to the parent frame.`
+## Success Criteria
+${args.successCriteria}
+
+---
+Work on this subtask, then use flame_pop to complete it and return to the parent frame.`
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error)
             log("PUSH: Failed", { error: message })
@@ -3174,114 +3546,111 @@ The new frame is now active. Work on this subtask, then use flame_pop to complet
       }),
 
       /**
-       * /pop - Complete current frame and return to parent (Phase 1.3 Enhanced)
+       * /pop - Complete current frame and return to parent
        *
-       * Enhanced to support compaction-based summary generation:
-       * - If generateSummary=true, registers a pending completion that will be
-       *   finalized when the next compaction event fires
-       * - The compaction will use the frame_completion prompt type
-       * - The final summary will combine user summary + compaction summary
+       * Requires detailed results and a compacted version for tree display.
        */
       flame_pop: tool({
         description:
-          "Complete the current frame and return to the parent frame. Use when a subtask is done, failed, or blocked.",
+          `Complete a frame and return to its parent. Requires both full results and a compacted version.
+
+RESULTS FORMAT:
+- Be SPECIFIC, not generic. Include concrete details that enable resumption.
+- WHAT was done: specific files, functions, endpoints, components created/modified
+- KEY DECISIONS: technical choices made and why (e.g., "Used Redis for caching because X")
+- CURRENT STATE: what works now, what's tested, what's deployed
+- BLOCKERS/NEXT: any issues hit, dependencies needed, or immediate next steps
+
+COMPACTED VERSION:
+- NOT a vague summary - preserve key specifics in condensed form
+- Think "compression" not "generalization"
+- Can be a few sentences or short paragraph - maximize information density
+- This appears in the frame tree and sibling context
+
+AVOID: Vague text like "Made progress on the feature" or "Updated the code"
+
+GOOD EXAMPLE (compacted): "Auth endpoints complete: POST /register, /login, /logout in src/auth/. JWT w/ 24h expiry, bcrypt passwords. Tests passing. Blocked: SMTP config needed for password reset."`,
         args: {
+          frameID: tool.schema
+            .string()
+            .optional()
+            .describe("Specific frame ID to complete. If not provided, uses current session."),
           status: tool.schema
             .enum(["completed", "failed", "blocked"])
             .describe("The completion status of this frame"),
-          summary: tool.schema
+          results: tool.schema
             .string()
-            .optional()
-            .describe("Optional summary of what was accomplished or why it failed/blocked"),
-          generateSummary: tool.schema
-            .boolean()
-            .optional()
-            .describe("If true, request a compaction-based summary before completing (default: false)"),
+            .describe("Full detailed results: what was accomplished, decisions made, current state, blockers."),
+          resultsCompacted: tool.schema
+            .string()
+            .describe("Dense compacted version for tree display. Preserve specifics, don't generalize. This appears in sibling/parent context."),
         },
         async execute(args, toolCtx) {
-          const currentSessionID = runtime.currentSessionID
+          // Use provided frameID or fall back to current session
+          const targetFrameID = args.frameID || runtime.currentSessionID
 
-          if (!currentSessionID) {
-            return "Error: No active session"
+          if (!targetFrameID) {
+            return "Error: No frame ID provided and no active session"
           }
 
-          const frame = await manager.getFrame(currentSessionID)
+          // Both results fields are required
+          if (!args.results || args.results.trim().length === 0) {
+            return `Error: results is required. Provide detailed results of what was accomplished.`
+          }
+          if (!args.resultsCompacted || args.resultsCompacted.trim().length === 0) {
+            return `Error: resultsCompacted is required. Provide a dense, information-rich compacted version.`
+          }
+
+          const frame = await manager.getFrame(targetFrameID)
           if (!frame) {
-            return "Error: Current session is not a tracked frame"
+            return `Error: Frame not found: ${targetFrameID}`
           }
 
           if (!frame.parentSessionID) {
             return "Error: Cannot pop from root frame. This is the top-level frame."
           }
 
-          const parentID = frame.parentSessionID
-
-          // Phase 1.3: If generateSummary is requested, register pending completion
-          if (args.generateSummary) {
-            // Register this as a pending frame completion
-            registerPendingCompletion(
-              currentSessionID,
-              args.status as FrameStatus,
-              args.summary
-            )
-
-            log("POP: Registered pending frame completion (awaiting compaction)", {
-              sessionID: currentSessionID,
-              status: args.status,
-              parentID,
-            })
-
-            // Invalidate caches now (completed frame affects parent's sibling context)
-            invalidateCache(currentSessionID)
-            invalidateCache(parentID)
-
-            return `# Frame Completion Pending
-
-**Frame:** ${currentSessionID.substring(0, 8)}
-**Target Status:** ${args.status}
-**Parent:** ${parentID.substring(0, 8)}
-
-The frame completion has been registered. The next compaction event will:
-1. Generate a comprehensive summary using the frame completion prompt
-2. Combine your summary (if provided) with the generated summary
-3. Finalize the frame completion
-
-**Your Summary:** ${args.summary || "(none provided)"}
-
-To trigger the summary generation now, you can continue the conversation until compaction triggers, or the summary will be generated automatically when context overflows.
-
-The compaction prompt will focus on:
-- Progress toward the frame goal: "${frame.goal}"
-- Key outcomes and artifacts
-- Important decisions made
-- Any blockers or dependencies`
+          // Prevent re-popping completed frames
+          if (frame.status === "completed" || frame.status === "failed" || frame.status === "invalidated") {
+            return `Error: Frame already has terminal status: ${frame.status}. Cannot pop again.`
           }
 
-          // Standard completion without compaction-based summary
+          const parentID = frame.parentSessionID
+
+          // Complete the frame with results
           await manager.completeFrame(
-            currentSessionID,
+            targetFrameID,
             args.status as FrameStatus,
-            args.summary
+            args.results,
+            args.resultsCompacted
           )
 
-          // Phase 1.2: Invalidate caches (completed frame affects parent's sibling context)
-          invalidateCache(currentSessionID)
+          // Invalidate caches (completed frame affects parent's sibling context)
+          invalidateCache(targetFrameID)
           invalidateCache(parentID)
 
-          log("POP: Completed frame immediately", {
-            sessionID: currentSessionID,
+          log("POP: Completed frame", {
+            sessionID: targetFrameID,
             status: args.status,
             parentID,
+            resultsLength: args.results.length,
           })
 
-          return `Frame completed with status: ${args.status}
+          return `# Frame Completed
 
-Summary: ${args.summary || "(no summary provided)"}
-Parent frame: ${parentID.substring(0, 8)}
+**Status:** ${args.status}
+**Frame:** ${targetFrameID.substring(0, 8)}
+**Title:** ${frame.title}
+**Parent:** ${parentID.substring(0, 8)}
 
-Returning to parent frame. The completed frame's context will be available as a summary in the parent.
+## Results
+${args.results}
 
-**Tip:** Use \`generateSummary: true\` to request an AI-generated summary that captures the full context of the frame's work.`
+## Compacted (for tree)
+${args.resultsCompacted}
+
+---
+This is now available as context for sibling frames and the parent.`
         },
       }),
 
@@ -3315,12 +3684,13 @@ Returning to parent frame. The completed frame's context will be available as a 
               invalidated: "[-]",
             }[frame.status]
 
-            let line = `${prefix}${marker}${statusIcon} ${frame.goal} (${frame.sessionID.substring(0, 8)})\n`
+            const titleDisplay = `${frame.title}: ${frame.successCriteriaCompacted}`
+            let line = `${prefix}${marker}${statusIcon} ${titleDisplay.substring(0, 60)}${titleDisplay.length > 60 ? '...' : ''} (${frame.sessionID.substring(0, 8)})\n`
 
-            // Add summary if completed
-            if (frame.compactionSummary && indent < 2) {
-              const summaryPreview = frame.compactionSummary.substring(0, 100)
-              line += `${prefix}        Summary: ${summaryPreview}...\n`
+            // Add results if completed
+            if (frame.resultsCompacted && indent < 2) {
+              const resultsPreview = frame.resultsCompacted.substring(0, 100)
+              line += `${prefix}        Results: ${resultsPreview}${frame.resultsCompacted.length > 100 ? '...' : ''}\n`
             }
 
             return line
@@ -3364,36 +3734,66 @@ Returning to parent frame. The completed frame's context will be available as a 
       }),
 
       /**
-       * /flame-set-goal - Update the goal of the current frame
+       * flame_frame_details - Show full details for a specific frame
        */
-      flame_set_goal: tool({
-        description: "Update the goal of the current frame",
+      flame_frame_details: tool({
+        description:
+          "Show complete details for a specific frame including full success criteria and results. Use this to see the uncompacted versions.",
         args: {
-          goal: tool.schema.string().describe("The new goal for this frame"),
+          frameID: tool.schema.string().describe("The frame ID to show details for"),
         },
         async execute(args, toolCtx) {
-          const sessionID = runtime.currentSessionID
-          if (!sessionID) {
-            return "Error: No active session"
+          if (!args.frameID) {
+            return "Error: Frame ID is required"
           }
 
-          const state = await loadState(directory)
-          const frame = state.frames[sessionID]
+          const frame = await manager.getFrame(args.frameID)
           if (!frame) {
-            return "Error: Current session is not a tracked frame"
+            return `Error: Frame not found: ${args.frameID}`
           }
 
-          frame.goal = args.goal
-          frame.updatedAt = Date.now()
-          state.frames[sessionID] = frame
+          let output = `# Frame Details: ${frame.title}\n\n`
+          output += `**Frame ID:** ${frame.sessionID}\n`
+          output += `**Status:** ${frame.status}\n`
+          output += `**Parent:** ${frame.parentSessionID || "root"}\n`
+          output += `**Created:** ${new Date(frame.createdAt).toISOString()}\n`
+          output += `**Updated:** ${new Date(frame.updatedAt).toISOString()}\n\n`
 
-          await saveFrame(directory, frame)
-          await saveState(directory, state)
+          output += `## Success Criteria\n\n`
+          output += `${frame.successCriteria}\n\n`
+          output += `**Compacted:** ${frame.successCriteriaCompacted}\n\n`
 
-          // Phase 1.2: Invalidate cache (goal change affects sibling relevance scoring)
-          invalidateCache(sessionID)
+          if (frame.results) {
+            output += `## Results\n\n`
+            output += `${frame.results}\n\n`
+            output += `**Compacted:** ${frame.resultsCompacted}\n\n`
+          }
 
-          return `Frame goal updated to: "${args.goal}"`
+          if (frame.artifacts.length > 0) {
+            output += `## Artifacts\n\n`
+            frame.artifacts.forEach((a) => (output += `- ${a}\n`))
+            output += `\n`
+          }
+
+          if (frame.decisions.length > 0) {
+            output += `## Decisions\n\n`
+            frame.decisions.forEach((d) => (output += `- ${d}\n`))
+            output += `\n`
+          }
+
+          if (frame.plannedChildren && frame.plannedChildren.length > 0) {
+            output += `## Planned Children\n\n`
+            frame.plannedChildren.forEach((c) => (output += `- ${c}\n`))
+            output += `\n`
+          }
+
+          if (frame.invalidationReason) {
+            output += `## Invalidation\n\n`
+            output += `**Reason:** ${frame.invalidationReason}\n`
+            output += `**At:** ${new Date(frame.invalidatedAt!).toISOString()}\n`
+          }
+
+          return output
         },
       }),
 
@@ -3625,7 +4025,8 @@ Returning to parent frame. The completed frame's context will be available as a 
 
           let output = `# Manual Summary Request\n\n`
           output += `**Frame:** ${frame.sessionID.substring(0, 8)}\n`
-          output += `**Goal:** ${frame.goal}\n`
+          output += `**Title:** ${frame.title}\n`
+          output += `**Success Criteria:** ${frame.successCriteria}\n`
           output += `**Status:** ${frame.status}\n\n`
 
           if (args.note) {
@@ -3645,7 +4046,7 @@ Returning to parent frame. The completed frame's context will be available as a 
 
           log("Manual summary requested", {
             sessionID,
-            goal: frame.goal,
+            title: frame.title,
             note: args.note,
           })
 
@@ -3726,15 +4127,16 @@ Returning to parent frame. The completed frame's context will be available as a 
 
           let output = `# Frame Summary\n\n`
           output += `**Frame ID:** ${frame.sessionID.substring(0, 8)}\n`
-          output += `**Goal:** ${frame.goal}\n`
+          output += `**Title:** ${frame.title}\n`
+          output += `**Success Criteria:** ${frame.successCriteria}\n`
           output += `**Status:** ${frame.status}\n`
           output += `**Created:** ${new Date(frame.createdAt).toISOString()}\n`
           output += `**Updated:** ${new Date(frame.updatedAt).toISOString()}\n\n`
 
-          if (frame.compactionSummary) {
-            output += `## Compaction Summary\n\n${frame.compactionSummary}\n`
+          if (frame.resultsCompacted) {
+            output += `## Results\n\n${frame.results || frame.resultsCompacted}\n`
           } else {
-            output += `*No compaction summary available yet.*\n`
+            output += `*No results available yet.*\n`
           }
 
           if (frame.artifacts.length > 0) {
@@ -4100,10 +4502,25 @@ The parent frame (${subagentSession.parentSessionID.substring(0, 8)}) will now i
        * Phase 1.6: Frames can exist in 'planned' state before execution
        */
       flame_plan: tool({
-        description:
-          "Create a planned frame for future work. Planned frames appear in the frame tree but are not started yet. Use flame_activate to start working on a planned frame.",
+        description: `Create a planned frame for future work. Planned frames appear in the frame tree but are not started yet. Use flame_activate to start working on a planned frame.
+
+SUCCESS CRITERIA FORMAT:
+- Define what "done" looks like in concrete, verifiable terms
+- Include specific deliverables (files, endpoints, tests, etc.)
+- Be precise about scope boundaries
+
+COMPACTED VERSION:
+- Dense, information-rich summary (not a vague generalization)
+- Preserve key specifics: names, decisions, constraints
+- Think "compression" not "summarization"`,
         args: {
-          goal: tool.schema.string().describe("The goal/purpose of this planned frame"),
+          title: tool.schema.string().describe("Short name for the frame (2-5 words)"),
+          successCriteria: tool.schema
+            .string()
+            .describe("Full success criteria - what defines 'done' for this frame"),
+          successCriteriaCompacted: tool.schema
+            .string()
+            .describe("Dense compacted version of success criteria for tree display"),
           parentSessionID: tool.schema
             .string()
             .optional()
@@ -4126,7 +4543,13 @@ The parent frame (${subagentSession.parentSessionID.substring(0, 8)}) will now i
             // Generate a unique ID for the planned frame
             const plannedID = `plan-${Date.now()}-${Math.random().toString(36).substring(7)}`
 
-            const frame = await manager.createPlannedFrame(plannedID, args.goal, parentID)
+            const frame = await manager.createPlannedFrame(
+              plannedID,
+              args.title,
+              args.successCriteria,
+              args.successCriteriaCompacted,
+              parentID
+            )
 
             // Invalidate parent cache
             invalidateCache(parentID)
@@ -4134,18 +4557,20 @@ The parent frame (${subagentSession.parentSessionID.substring(0, 8)}) will now i
             log("PLAN: Created planned frame", {
               plannedID,
               parentID,
-              goal: args.goal,
+              title: args.title,
             })
 
             return `# Planned Frame Created
 
-**Frame ID:** ${frame.sessionID.substring(0, 12)}
+**Frame ID:** ${frame.sessionID}
 **Parent:** ${parentID.substring(0, 8)}
-**Goal:** ${args.goal}
+**Title:** ${args.title}
+**Success Criteria:** ${args.successCriteria}
 **Status:** planned
 
 The planned frame has been added to the frame tree. To start working on it:
 - Use \`flame_activate\` with the frame ID to begin work
+- Use \`flame_invalidate\` with the frame ID to invalidate it
 - Or plan more children with \`flame_plan_children\`
 
 Planned frames will be automatically invalidated if their parent is invalidated.`
@@ -4162,16 +4587,33 @@ Planned frames will be automatically invalidated if their parent is invalidated.
        * Phase 1.6: Allows sketching out B→B1,B2,B3 before starting B
        */
       flame_plan_children: tool({
-        description:
-          "Create multiple planned child frames at once. Use to sketch out the structure of subtasks before starting work on them.",
+        description: `Create multiple planned child frames at once. Use to sketch out the structure of subtasks before starting work on them.
+
+Each child needs:
+- title: Short name (2-5 words)
+- successCriteria: Full success criteria - what defines 'done'
+- successCriteriaCompacted: Dense version for tree display
+
+COMPACTED VERSION:
+- Dense, information-rich summary (not a vague generalization)
+- Preserve key specifics: names, decisions, constraints
+- Think "compression" not "summarization"`,
         args: {
           parentSessionID: tool.schema
             .string()
             .optional()
             .describe("Parent frame session ID (uses current frame if not provided)"),
           children: tool.schema
-            .array(tool.schema.string())
-            .describe("Array of goals for the planned child frames"),
+            .array(
+              tool.schema.object({
+                title: tool.schema.string().describe("Short name (2-5 words)"),
+                successCriteria: tool.schema.string().describe("Full success criteria"),
+                successCriteriaCompacted: tool.schema
+                  .string()
+                  .describe("Dense compacted version"),
+              })
+            )
+            .describe("Array of child frame definitions"),
         },
         async execute(args, toolCtx) {
           const parentID = args.parentSessionID || runtime.currentSessionID
@@ -4181,14 +4623,16 @@ Planned frames will be automatically invalidated if their parent is invalidated.
           }
 
           if (!args.children || args.children.length === 0) {
-            return "Error: No children provided. Use children: ['goal1', 'goal2', ...]"
+            return "Error: No children provided. Each child needs: title, successCriteria, successCriteriaCompacted"
           }
 
           try {
             // Generate unique IDs for each planned frame
-            const childrenWithIDs = args.children.map((goal, index) => ({
+            const childrenWithIDs = args.children.map((child, index) => ({
               sessionID: `plan-${Date.now()}-${index}-${Math.random().toString(36).substring(7)}`,
-              goal,
+              title: child.title,
+              successCriteria: child.successCriteria,
+              successCriteriaCompacted: child.successCriteriaCompacted,
             }))
 
             const frames = await manager.createPlannedChildren(parentID, childrenWithIDs)
@@ -4207,12 +4651,14 @@ Planned frames will be automatically invalidated if their parent is invalidated.
             output += `## Planned Frames\n\n`
 
             frames.forEach((frame, index) => {
-              output += `${index + 1}. **${frame.goal}**\n`
-              output += `   - ID: ${frame.sessionID.substring(0, 12)}\n`
+              output += `${index + 1}. **${frame.title}**\n`
+              output += `   - ID: ${frame.sessionID}\n`
+              output += `   - Criteria: ${frame.successCriteriaCompacted}\n`
               output += `   - Status: planned\n\n`
             })
 
             output += `Use \`flame_activate\` with a frame ID to start working on a planned frame.\n`
+            output += `Use \`flame_invalidate\` with a frame ID to invalidate a planned frame.\n`
             output += `Use \`flame_tree\` to see the full frame structure.`
 
             return output
@@ -4227,10 +4673,11 @@ Planned frames will be automatically invalidated if their parent is invalidated.
       /**
        * flame_activate - Start working on a planned frame
        * Phase 1.6: Changes status from 'planned' to 'in_progress'
+       * Phase 2: Creates a real OpenCode session and replaces the plan-* ID
        */
       flame_activate: tool({
         description:
-          "Start working on a planned frame. Changes the frame's status from 'planned' to 'in_progress' and makes it the active frame.",
+          "Start working on a planned frame. Creates a real OpenCode session, changes the frame's status from 'planned' to 'in_progress', and makes it the active frame.",
         args: {
           sessionID: tool.schema
             .string()
@@ -4241,38 +4688,117 @@ Planned frames will be automatically invalidated if their parent is invalidated.
             return "Error: Session ID is required"
           }
 
-          const frame = await manager.activateFrame(args.sessionID)
-
-          if (!frame) {
-            // Check if frame exists but isn't planned
-            const existingFrame = await manager.getFrame(args.sessionID)
-            if (existingFrame) {
-              return `Error: Frame ${args.sessionID.substring(0, 8)} is not in 'planned' status (current status: ${existingFrame.status})`
-            }
+          // First, check if frame exists and is planned
+          const existingFrame = await manager.getFrame(args.sessionID)
+          if (!existingFrame) {
             return `Error: Frame not found: ${args.sessionID.substring(0, 8)}`
           }
-
-          // Invalidate caches
-          invalidateCache(args.sessionID)
-          if (frame.parentSessionID) {
-            invalidateCache(frame.parentSessionID)
+          if (existingFrame.status !== "planned") {
+            return `Error: Frame ${args.sessionID.substring(0, 8)} is not in 'planned' status (current status: ${existingFrame.status})`
           }
 
-          log("ACTIVATE: Frame activated", {
-            sessionID: args.sessionID,
-            goal: frame.goal,
-          })
+          try {
+            // Determine the parent session ID for the new session
+            // If the parent is also a plan-* ID, we can't use it as a parent
+            // Only use real ses_* IDs as parents
+            let parentID: string | undefined
+            if (existingFrame.parentSessionID?.startsWith("ses_")) {
+              parentID = existingFrame.parentSessionID
+            }
 
-          return `# Frame Activated
+            // Create a real OpenCode session
+            const newSession = await client.session.create({
+              body: {
+                parentID,
+                title: existingFrame.title,
+              },
+            })
+
+            if (!newSession.data) {
+              return "Error: Failed to create OpenCode session"
+            }
+
+            const newSessionID = newSession.data.id
+
+            // Replace the plan-* ID with the real ses_* ID
+            await manager.replaceFrameID(args.sessionID, newSessionID)
+
+            // Now activate the frame (which updates status to in_progress)
+            const frame = await manager.activateFrame(newSessionID)
+
+            if (!frame) {
+              // This shouldn't happen since we just created it
+              log("ACTIVATE: Failed to activate after ID replacement", {
+                oldID: args.sessionID,
+                newID: newSessionID,
+              })
+              return `Error: Failed to activate frame after session creation`
+            }
+
+            // Invalidate caches
+            invalidateCache(newSessionID)
+            if (frame.parentSessionID) {
+              invalidateCache(frame.parentSessionID)
+            }
+
+            log("ACTIVATE: Frame activated with real session", {
+              oldID: args.sessionID,
+              newSessionID,
+              title: frame.title,
+            })
+
+            // Generate call-stack context for the new session
+            // This provides the session with orientation about what has been done before
+            const callStackContext = await generateFrameContext(manager, newSessionID)
+            log("ACTIVATE: Generated call-stack context", {
+              newSessionID,
+              contextLength: callStackContext.length,
+            })
+
+            // Send initial prompt to kick off work in the new session
+            // Rules and workflow guidance are now in the system prompt via <workflow-guidance>
+            const initialPrompt = `# ${frame.title}
+
+**Success Criteria:** ${frame.successCriteria}
+
+Begin working on your task now.`
+
+            // Fire-and-forget: Send initial prompt without awaiting
+            // This avoids potential response parsing issues with promptAsync
+            client.session.promptAsync({
+              path: { id: newSessionID },
+              body: {
+                // Include the call-stack context as the system prompt
+                system: callStackContext,
+                parts: [{ type: "text", text: initialPrompt }],
+              },
+            }).then(() => {
+              log("ACTIVATE: Initial prompt sent to session with call-stack context", { newSessionID })
+            }).catch((promptError) => {
+              // Log but don't fail - the session was created successfully
+              const promptMessage =
+                promptError instanceof Error
+                  ? promptError.message
+                  : String(promptError)
+              log("ACTIVATE: Failed to send initial prompt (non-fatal)", {
+                error: promptMessage,
+              })
+            })
+
+            return `# Frame Activated
 
 **Frame ID:** ${frame.sessionID.substring(0, 8)}
-**Goal:** ${frame.goal}
+**Title:** ${frame.title}
+**Success Criteria:** ${frame.successCriteria}
 **Status:** in_progress (was: planned)
 **Parent:** ${frame.parentSessionID?.substring(0, 8) || "root"}
 
-The frame is now active. Work on this task, then use \`flame_pop\` to complete it.
-
-Tip: Use \`flame_tree\` to see the current frame structure.`
+A new OpenCode session has been created. Workflow guidance is provided in the system prompt.`
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error)
+            log("ACTIVATE: Failed to create session", { error: message })
+            return `Error creating session: ${message}`
+          }
         },
       }),
 
@@ -4328,7 +4854,7 @@ Tip: Use \`flame_tree\` to see the current frame structure.`
 
           let output = `# Frame Invalidated\n\n`
           output += `**Frame ID:** ${result.invalidated.sessionID.substring(0, 8)}\n`
-          output += `**Goal:** ${result.invalidated.goal}\n`
+          output += `**Title:** ${result.invalidated.title}\n`
           output += `**Reason:** ${args.reason}\n`
           output += `**Status:** invalidated\n\n`
 
@@ -4336,7 +4862,7 @@ Tip: Use \`flame_tree\` to see the current frame structure.`
             output += `## Cascaded Invalidations\n\n`
             output += `The following planned children were automatically invalidated:\n\n`
             result.cascadedPlanned.forEach(frame => {
-              output += `- **${frame.goal}** (${frame.sessionID.substring(0, 8)})\n`
+              output += `- **${frame.title}** (${frame.sessionID.substring(0, 8)})\n`
             })
             output += `\n`
           }
@@ -4345,7 +4871,7 @@ Tip: Use \`flame_tree\` to see the current frame structure.`
             output += `## Warning: In-Progress Children\n\n`
             output += `The following frames are still in progress and were NOT auto-invalidated:\n\n`
             result.warningInProgress.forEach(frame => {
-              output += `- **${frame.goal}** (${frame.sessionID.substring(0, 8)}) - status: ${frame.status}\n`
+              output += `- **${frame.title}** (${frame.sessionID.substring(0, 8)}) - status: ${frame.status}\n`
             })
             output += `\nConsider reviewing these frames and manually invalidating or completing them.\n\n`
           }
@@ -4417,8 +4943,9 @@ Tip: Use \`flame_tree\` to see the current frame structure.`
             const connector = isLast ? "└──" : "├──"
             const icon = statusIcon[frame.status] || "?"
 
-            // Build the line
-            let line = `${prefix}${connector} ${icon} ${frame.goal.substring(0, 50)}${frame.goal.length > 50 ? '...' : ''}`
+            // Build the line - show title and compacted criteria
+            const titleDisplay = `${frame.title}: ${frame.successCriteriaCompacted}`
+            let line = `${prefix}${connector} ${icon} ${titleDisplay.substring(0, 60)}${titleDisplay.length > 60 ? '...' : ''}`
             line += ` (${frame.sessionID.substring(0, 8)})`
             if (frameID === currentID) {
               line += " <<<ACTIVE"
@@ -4431,9 +4958,9 @@ Tip: Use \`flame_tree\` to see the current frame structure.`
               if (frame.invalidationReason) {
                 line += `${detailPrefix}    Reason: ${frame.invalidationReason.substring(0, 60)}${frame.invalidationReason.length > 60 ? '...' : ''}\n`
               }
-              if (frame.compactionSummary) {
-                const summaryPreview = frame.compactionSummary.substring(0, 80).replace(/\n/g, ' ')
-                line += `${detailPrefix}    Summary: ${summaryPreview}${frame.compactionSummary.length > 80 ? '...' : ''}\n`
+              if (frame.resultsCompacted) {
+                const resultsPreview = frame.resultsCompacted.substring(0, 80).replace(/\n/g, ' ')
+                line += `${detailPrefix}    Results: ${resultsPreview}${frame.resultsCompacted.length > 80 ? '...' : ''}\n`
               }
               if (frame.artifacts.length > 0) {
                 line += `${detailPrefix}    Artifacts: ${frame.artifacts.slice(0, 3).join(', ')}${frame.artifacts.length > 3 ? '...' : ''}\n`
@@ -4485,7 +5012,8 @@ Tip: Use \`flame_tree\` to see the current frame structure.`
               // For root frames, use a different format
               const icon = statusIcon[rootFrame.status] || "?"
               const marker = rootFrame.sessionID === currentID ? ">>>" : "   "
-              output += `${marker} ${icon} ${rootFrame.goal.substring(0, 50)}${rootFrame.goal.length > 50 ? '...' : ''}`
+              const titleDisplay = `${rootFrame.title}: ${rootFrame.successCriteriaCompacted}`
+              output += `${marker} ${icon} ${titleDisplay.substring(0, 60)}${titleDisplay.length > 60 ? '...' : ''}`
               output += ` (${rootFrame.sessionID.substring(0, 8)})`
               if (rootFrame.sessionID === currentID) {
                 output += " <<<ACTIVE"
@@ -4837,7 +5365,7 @@ Tip: Use \`flame_tree\` to see the current frame structure.`
 
           let output = `# Pop Heuristic Evaluation\n\n`
           output += `**Session:** ${sessionID.substring(0, 8)}\n`
-          output += `**Current Goal:** ${frame.goal}\n`
+          output += `**Current Task:** ${frame.title}\n`
           output += `**Autonomy Level:** ${config.level}\n\n`
 
           output += `## Recommendation\n`
@@ -4984,17 +5512,17 @@ Tip: Use \`flame_tree\` to see the current frame structure.`
        */
       flame_get_state: tool({
         description:
-          "Get complete flame state for UI rendering. Returns the full frame tree including all frames, active frame ID, and root frame IDs.",
+          "Get complete flame state for UI rendering. Returns the full frame tree including all frames, active frame ID, and root frame IDs as JSON.",
         args: {},
         async execute(args, toolCtx) {
           const state = await manager.loadState()
-          return {
+          return JSON.stringify({
             version: state.version,
             frames: state.frames,
             activeFrameID: state.activeFrameID,
             rootFrameIDs: state.rootFrameIDs,
             updatedAt: state.updatedAt,
-          }
+          }, null, 2)
         },
       }),
 
