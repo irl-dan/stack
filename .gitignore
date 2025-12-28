@@ -8,7 +8,6 @@ dist/
 financial-model-agent/
 financial-modeling-cli/
 foi-platform/
-webapp/
 test-projects/
 calculator.ts
 calculator.test.ts
@@ -21,9 +20,11 @@ phase2/docs/
 phase2/research/
 
 # Runtime state (regenerated on each run)
-.opencode/flame/frames/
-.opencode/flame/state.json
-.opencode/flame/validation-*.json
+.opencode/*/frames/
+.opencode/*/state.json
+.opencode/*/validation-*.json
 
 # OS files
 .DS_Store
+
+archive/

@@ -1,6 +1,6 @@
 # Backstory: How We Got Here
 
-This document captures the exploration and decision-making process that led to our implementation plan for Flame Graph Context Management.
+This document captures the exploration and decision-making process that led to the Call Stack Context Manager implementation.
 
 ## The Problem Statement
 
@@ -16,23 +16,24 @@ The insight: Engineers naturally think of work as a **call stack** (push subtask
 
 ## The Solution Vision
 
-Organize agent context as a **tree of frames** (like a flame graph) rather than a linear chat log:
+Organize agent context as a **tree of frames** (like a call stack) rather than a linear chat log:
 
 ```
                 [Root Frame: "Build App"]
-                       │
-       ┌───────────────┴───────────────┐
-       │                               │
+                       |
+       +---------------+---------------+
+       |                               |
  [Frame A: Auth]                [Frame B: API Routes]
   (completed)                      (in progress)
-       │                               │
-  ┌────┴────┐                    ┌─────┴─────┐
-  │         │                    │           │
+       |                               |
+  +----+----+                    +-----+-----+
+  |         |                    |           |
 [A1]      [A2]                 [B1]        [B2]
 (done)    (done)            (in progress) (planned)
 ```
 
 Key mechanics:
+
 - **Frame Push/Pop** - Create child frames for subtasks, pop when complete
 - **Full Logs to Disk** - Nothing truly lost
 - **Compaction on Pop** - Summary injected into parent context
@@ -44,21 +45,21 @@ We systematically evaluated six implementation approaches across two platforms (
 
 ### Claude Code Approaches
 
-| Proposal | Approach | Verdict |
-|----------|----------|---------|
-| 01 | Inside Claude Code (plugins, hooks, skills) | SUBSTANTIALLY FEASIBLE - but limited to depth-1 via subagents |
-| 02 | Composing Claude Codes (meta-agent orchestrating CLI sessions) | FEASIBLE WITH CAVEATS - achieves isolation but complex |
-| 03 | Claude Agents SDK | FULLY FEASIBLE - full control but ground-up build |
+| Proposal | Approach                                                       | Verdict                                                       |
+| -------- | -------------------------------------------------------------- | ------------------------------------------------------------- |
+| 01       | Inside Claude Code (plugins, hooks, skills)                    | SUBSTANTIALLY FEASIBLE - but limited to depth-1 via subagents |
+| 02       | Composing Claude Codes (meta-agent orchestrating CLI sessions) | FEASIBLE WITH CAVEATS - achieves isolation but complex        |
+| 03       | Claude Agents SDK                                              | FULLY FEASIBLE - full control but ground-up build             |
 
 **Key Finding for Claude Code:** Subagents provide context isolation, but "subagents cannot spawn other subagents" - limiting native support to depth-1 frame trees.
 
 ### OpenCode Approaches
 
-| Proposal | Approach | Verdict |
-|----------|----------|---------|
-| 04 | OpenCode Native (plugins, SDK) | HIGHLY FEASIBLE - native session isolation |
-| 05 | OpenCode SDK (external orchestrator) | FEASIBLE WITH LIMITATIONS |
-| 06 | OpenCode Fork/PR | PR-ABLE - backwards compatible |
+| Proposal | Approach                             | Verdict                                    |
+| -------- | ------------------------------------ | ------------------------------------------ |
+| 04       | OpenCode Native (plugins, SDK)       | HIGHLY FEASIBLE - native session isolation |
+| 05       | OpenCode SDK (external orchestrator) | FEASIBLE WITH LIMITATIONS                  |
+| 06       | OpenCode Fork/PR                     | PR-ABLE - backwards compatible             |
 
 **Key Finding for OpenCode:** Sessions have TRUE context isolation. Each session's `prompt.ts` loop fetches only its own messages - `parentID` is purely navigational metadata. This means a plugin creating child sessions for "frames" achieves true LLM-level context isolation.
 
@@ -67,12 +68,14 @@ We systematically evaluated six implementation approaches across two platforms (
 Deep source code analysis revealed:
 
 **Context Isolation: PLUGIN CAN ACHIEVE**
+
 ```typescript
 // From prompt.ts - each session fetches ONLY its own messages
-let msgs = await MessageV2.filterCompacted(MessageV2.stream(sessionID))
+let msgs = await MessageV2.filterCompacted(MessageV2.stream(sessionID));
 ```
 
 **UI Visualization: PLUGIN CANNOT ACHIEVE**
+
 - Desktop app has no plugin extension points for UI
 - No hooks for injecting components or panels
 - Requires fork or external UI
@@ -91,16 +94,19 @@ Through clarifying questions, we established:
 Given these criteria, we chose:
 
 **Phase 1: OpenCode Plugin** (Week 1)
+
 - Achieves true context isolation via session-per-frame
 - Validates the core architectural improvement
 - No fork required
 
 **Phase 2: External Web UI** (Week 2)
+
 - Visualization via separate web app using OpenCode SDK
 - Avoids fork while providing visualization
 - Can be integrated upstream later
 
 **Phase 3: Upstream Contribution** (After validation)
+
 - Propose frame system to OpenCode team
 - Include UI extension points proposal
 - Full community benefit
