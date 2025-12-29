@@ -145,6 +145,13 @@ The `FrameStateManager` class provides all frame lifecycle operations:
 | `invalidateFrame(sessionID, reason)` | Invalidate frame with cascade |
 | `getFramesByStatus(status)` | Get all frames with given status |
 
+**Parent Resolution:** When `stack_frame_plan` or `stack_frame_plan_children` is called without an explicit `parentSessionID`, the parent is resolved in this order:
+1. Explicit `parentSessionID` argument (if provided)
+2. `state.activeFrameID` (the currently active frame in plugin state)
+3. `runtime.currentSessionID` (the OpenCode session receiving messages)
+
+This ensures nested frames are created correctly when planning from within an activated child frame.
+
 ### File Storage Functions
 
 | Function | Description |
@@ -393,7 +400,7 @@ Auto-tracks artifacts from file operations:
 | Tool | Description |
 |------|-------------|
 | `stack_frame_push` | Create child frame with title, successCriteria, successCriteriaCompacted |
-| `stack_frame_pop` | Complete frame with status (completed/failed/blocked), results, resultsCompacted |
+| `stack_frame_pop` | Complete frame with status (completed/failed/blocked), results, resultsCompacted. Root frames complete gracefully, marking the entire work tree as done. |
 | `stack_status` | Show frame tree with status icons and hierarchy |
 | `stack_tree` | ASCII visualization of frame tree with legend and statistics |
 | `stack_frame_details` | View full frame metadata including timestamps, artifacts, decisions |

@@ -3788,10 +3788,6 @@ GOOD EXAMPLE (compacted): "Auth endpoints complete: POST /register, /login, /log
             return `Error: Frame not found: ${targetFrameID}`;
           }
 
-          if (!frame.parentSessionID) {
-            return "Error: Cannot pop from root frame. This is the top-level frame.";
-          }
-
           // Prevent re-popping completed frames
           if (
             frame.status === "completed" ||
@@ -3802,6 +3798,42 @@ GOOD EXAMPLE (compacted): "Auth endpoints complete: POST /register, /login, /log
           }
 
           const parentID = frame.parentSessionID;
+
+          // Special handling for root frames - complete gracefully instead of erroring
+          if (!parentID) {
+            // Complete the root frame with results
+            await manager.completeFrame(
+              targetFrameID,
+              args.status as FrameStatus,
+              args.results,
+              args.resultsCompacted
+            );
+
+            // Invalidate cache for the completed root frame
+            invalidateCache(targetFrameID);
+
+            log("POP: Completed root frame", {
+              sessionID: targetFrameID,
+              status: args.status,
+              resultsLength: args.results.length,
+            });
+
+            return `# Root Frame Completed
+
+**Status:** ${args.status}
+**Frame:** ${targetFrameID.substring(0, 8)}
+**Title:** ${frame.title}
+
+## Results
+${args.results}
+
+## Compacted (for tree)
+${args.resultsCompacted}
+
+---
+This was the top-level frame. The work tree is now complete.
+Use \`stack_tree\` to see the full history, or start new work with \`stack_frame_push\`.`;
+          }
 
           // Complete the frame with results
           await manager.completeFrame(
@@ -4786,7 +4818,10 @@ COMPACTED VERSION:
             ),
         },
         async execute(args, toolCtx) {
-          const parentID = args.parentSessionID || runtime.currentSessionID;
+          // Use explicit arg, then active frame, then current session as fallbacks
+          // This ensures nested frames are created properly when activeFrameID differs from currentSessionID
+          const state = await manager.loadState();
+          const parentID = args.parentSessionID || state.activeFrameID || runtime.currentSessionID;
 
           if (!parentID) {
             return "Error: No parent session ID provided and no active session";
@@ -4880,7 +4915,10 @@ COMPACTED VERSION:
             .describe("Array of child frame definitions"),
         },
         async execute(args, toolCtx) {
-          const parentID = args.parentSessionID || runtime.currentSessionID;
+          // Use explicit arg, then active frame, then current session as fallbacks
+          // This ensures nested frames are created properly when activeFrameID differs from currentSessionID
+          const state = await manager.loadState();
+          const parentID = args.parentSessionID || state.activeFrameID || runtime.currentSessionID;
 
           if (!parentID) {
             return "Error: No parent session ID provided and no active session";
@@ -5719,7 +5757,7 @@ A new OpenCode session has been created. Workflow guidance is provided in the sy
 
           // Check if this is a root frame
           if (!frame.parentSessionID) {
-            output += `\n\n**Note:** This is a root frame and cannot be popped.`;
+            output += `\n\n**Note:** This is a root frame. Popping will mark the entire work tree as complete.`;
           }
 
           // If suggest or auto mode and should pop, create a suggestion
